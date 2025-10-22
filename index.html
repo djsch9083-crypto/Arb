@@ -3,90 +3,349 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Arb Radar v2 — Kalshi × Polymarket (Live)</title>
+<title>Arb Radar v5 — Fail-Safe Global Scanner</title>
 <style>
-  body {font-family: system-ui, sans-serif; background:#0b0f14; color:#e8eef7; margin:0;}
-  header {background:#0e141b; padding:14px; border-bottom:1px solid #1e2a3a;}
-  h1 {margin:0; font-size:18px;}
-  .container {padding:16px;}
-  .card {background:#0e141b; padding:12px; border:1px solid #1e2a3a; border-radius:10px; margin-bottom:10px;}
-  .mono {font-family: monospace;}
-  .good {color:#72f2b0;} .bad {color:#ff6b6b;}
+  :root{--bg:#0b0f14;--panel:#0e141b;--line:#1e2a3a;--text:#e8eef7;--muted:#9fb1c7;--good:#72f2b0;--warn:#ffcc66;--bad:#ff6b6b;--accent:#1a7f64}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  header{position:sticky;top:0;background:var(--panel);padding:12px 16px;border-bottom:1px solid var(--line);z-index:10}
+  h1{margin:0;font-size:18px}
+  .sub{opacity:.8;font-size:12px;margin-top:4px}
+  .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
+  label{font-size:12px;opacity:.9}
+  input,select{background:var(--bg);border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:8px}
+  input[type="number"]{width:90px}
+  button{background:var(--accent);border:0;color:#fff;padding:8px 12px;border-radius:8px;cursor:pointer}
+  button.secondary{background:#233141}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#16202b;border:1px solid var(--line);margin-left:6px;font-size:12px}
+  .muted{color:var(--muted)}
+  .container{padding:16px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);padding:12px;border-radius:12px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+  .tag{background:#1b2634;padding:2px 6px;border-radius:6px;font-size:11px;margin-left:6px}
+  .statusline{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:8px}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#6b7e93;margin-right:6px}
+  .ok{background:var(--good)}.err{background:var(--bad)}.warnDot{background:var(--warn)}
+  .section{margin-top:24px}
 </style>
 </head>
 <body>
 <header>
-  <h1>Arb Radar v2 — Kalshi × Polymarket (Live)</h1>
-  <p>Automatically fetching live odds. Refreshes every 10 seconds.</p>
+  <h1>Arb Radar v5 — Fail-Safe Global Scanner <span class="pill">live</span></h1>
+  <div class="sub">Kalshi • Polymarket • Manifold • Insight • Metaculus — local history, proxies, backoff, cache</div>
+  <div class="row">
+    <label>Min raw edge % <input id="minEdgePct" type="number" step="0.1" value="0.5"></label>
+    <label>Refresh (s) <input id="refreshSec" type="number" step="1" value="15"></label>
+    <label><input id="useKalshi" type="checkbox" checked> Kalshi</label>
+    <label><input id="usePoly" type="checkbox" checked> Polymarket</label>
+    <label><input id="useMani" type="checkbox" checked> Manifold</label>
+    <label><input id="useIns" type="checkbox" checked> Insight</label>
+    <label><input id="useMeta" type="checkbox" checked> Metaculus</label>
+    <button id="refreshBtn">Refresh now</button>
+    <button id="downloadBtn" class="secondary">Download History CSV</button>
+  </div>
+  <div class="statusline">
+    <span><span id="polyDot" class="dot"></span><span id="polyStatus" class="muted">Polymarket: idle</span></span>
+    <span><span id="kalshiDot" class="dot"></span><span id="kalshiStatus" class="muted">Kalshi: idle</span></span>
+    <span><span id="maniDot" class="dot"></span><span id="maniStatus" class="muted">Manifold: idle</span></span>
+    <span><span id="insDot" class="dot"></span><span id="insStatus" class="muted">Insight: idle</span></span>
+    <span><span id="metaDot" class="dot"></span><span id="metaStatus" class="muted">Metaculus: idle</span></span>
+    <span class="muted">Last updated: <span id="lastUpdated">–</span></span>
+    <span class="muted">Next refresh in: <span id="countdown">–</span>s</span>
+  </div>
 </header>
+
 <div class="container">
-  <div id="data">Loading…</div>
+  <div class="section">
+    <h3>Live Opportunities</h3>
+    <div id="live" class="cards"><div class="muted">Fetching…</div></div>
+  </div>
+
+  <div class="section">
+    <h3>History Book</h3>
+    <div id="history" class="cards"></div>
+  </div>
 </div>
 
 <script>
-async function fetchPolymarket(){
-  try{
-    const r=await fetch("https://gamma-api.polymarket.com/markets?limit=200");
-    return await r.json();
-  }catch(e){return [];}
+// ====== Helpers & Storage ======
+const S = {
+  keys: {
+    hist: 'arbHistoryV5',
+    cache: (src)=>`arbCacheV5_${src}`,
+    cfg: 'arbCfgV5'
+  }
+};
+function saveLocal(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}
+function readLocal(k,d=undefined){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch{return d}}
+const clamp01 = v => Math.max(0, Math.min(1, v));
+const STOP = new Set(['will','the','a','an','is','are','to','of','win','wins','winning','vs','@','on','in','for','be','who','what','which','?',':','-']);
+function normTitle(t){if(!t)return'';const s=t.toLowerCase().replace(/[^a-z0-9\s]/g,' ').replace(/\s+/g,' ').trim();return s.split(' ').filter(w=>w&&!STOP.has(w)).join(' ')}
+function jaccard(a,b){if(!a||!b)return 0;const A=new Set(a.split(' ')),B=new Set(b.split(' '));let inter=0;A.forEach(x=>{if(B.has(x))inter++});return inter/[...A,...B].filter((x,i,arr)=>arr.indexOf(x)===i).length||0}
+function setStatus(which,text,state){document.getElementById(which+'Status').textContent=text;const dot=document.getElementById(which+'Dot');dot.className='dot '+(state||'')}
+
+// ====== Proxies, timeouts, backoff, cache ======
+const PROX = [
+  u=>'https://corsproxy.io/?'+encodeURIComponent(u),
+  u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
+  u=>'https://r.jina.ai/http/'+encodeURIComponent(u.replace(/^https?:\/\//,'')),
+  u=>'https://thingproxy.freeboard.io/fetch/'+u
+];
+const backoff = {}; // src -> ms
+function nextBackoff(src){const cur=backoff[src]||0;const nxt=Math.min(60000, cur?Math.floor(cur*1.8):5000);backoff[src]=nxt;return nxt}
+function resetBackoff(src){backoff[src]=0}
+async function fetchTO(url,ms=8000){const c=new AbortController();const id=setTimeout(()=>c.abort(),ms);try{const r=await fetch(url+'?v='+(Date.now()),{signal:c.signal});clearTimeout(id);return r}catch(e){clearTimeout(id);throw e}}
+async function bestEffort(src, buildUrl, parseFn, statusId, useProxy=true){
+  setStatus(statusId,'Fetching…','warnDot');
+  const tryList = useProxy ? PROX.map(w=>w(buildUrl())) : [buildUrl()];
+  for(const u of tryList){
+    try{
+      const res=await fetchTO(u,8000); const j=await res.json();
+      const out=parseFn(j).filter(x=>x.y>0&&x.y<1);
+      if(out.length){ saveLocal(S.keys.cache(src),{t:Date.now(),items:out}); }
+      setStatus(statusId,`OK · ${out.length} items`,'ok'); resetBackoff(src); return out;
+    }catch(e){ /* try next */ }
+  }
+  // fall back to cache
+  const cached = readLocal(S.keys.cache(src),{t:0,items:[]});
+  if(cached.items.length){
+    const age = Math.floor((Date.now()-cached.t)/1000);
+    setStatus(statusId,`Using cache · ${cached.items.length} (age ${age}s)`,'warnDot');
+    nextBackoff(src);
+    return cached.items;
+  }
+  setStatus(statusId,'Failed (retry soon)','err');
+  nextBackoff(src);
+  return [];
 }
-async function fetchKalshi(){
-  const proxy="https://api.allorigins.win/raw?url=";
-  try{
-    const r=await fetch(proxy+encodeURIComponent("https://trading-api.kalshi.com/v2/markets?status=active&limit=200"));
-    const d=await r.json();
-    return d.markets||[];
-  }catch(e){return [];}
-}
-function key(a,b){return[a,b].map(x=>x.toLowerCase()).sort().join(" vs ");}
-function parse(d,src){
-  return d.map(m=>{
-    const t=(m.title||m.question||"").toLowerCase();
-    let a=null,b=null;
-    if(t.includes(" vs ")) [a,b]=t.split(" vs ");
-    else if(t.includes(" @ ")) [a,b]=t.split(" @ ");
-    const yes=src==="poly"
-      ? Number(m.bestBid||m.price||0)/100
-      : Number((m.order_book?.best_bid||m.last_price||0))/100;
-    return {src,a,b,yes};
-  }).filter(x=>x.a&&x.b&&x.yes>0&&x.yes<1);
-}
-function findArbs(poly,kalshi){
-  const idx=new Map();
-  kalshi.forEach(k=>{
-    const ky=key(k.a,k.b);
-    if(!idx.has(ky)) idx.set(ky,[]);
-    idx.get(ky).push(k);
-  });
-  const res=[];
-  poly.forEach(p=>{
-    const mates=idx.get(key(p.a,p.b))||[];
-    mates.forEach(k=>{
-      const sum=p.yes+k.yes;
-      const edge=1-sum;
-      if(edge>0.02) res.push({pair:key(p.a,p.b),sum,edge});
+
+// ====== Sources ======
+async function loadKalshi(enabled){
+  if(!enabled){setStatus('kalshi','Skipped','');return []}
+  const endpoint='https://trading-api.kalshi.com/v2/markets?status=active&limit=400';
+  return bestEffort('kalshi', ()=>endpoint, (d)=>{
+    const arr=d?.markets||d||[];
+    return arr.map(m=>{
+      const title=(m.title||m.ticker||'').trim();
+      const book=m.order_book||{};
+      const yes = clamp01(Number(book.best_ask||book.best_bid||m.last_price||0)/100);
+      return {s:'Kalshi', t:title, n:normTitle(title), y:yes};
     });
-  });
-  return res.sort((a,b)=>b.edge-a.edge);
+  }, 'kalshi', true);
 }
-async function update(){
-  document.getElementById("data").innerHTML="Fetching…";
-  const [p,k]=await Promise.all([fetchPolymarket(),fetchKalshi()]);
-  const P=parse(p,"poly"),K=parse(k,"kalshi");
-  const arbs=findArbs(P,K);
-  const root=document.getElementById("data");
-  root.innerHTML="";
-  if(!arbs.length){root.innerHTML="<p>No current arbitrage opportunities.</p>";return;}
-  arbs.forEach(a=>{
-    const div=document.createElement("div");
-    div.className="card";
-    div.innerHTML=`<strong>${a.pair}</strong><br>Sum: ${(a.sum*100).toFixed(1)}¢<br>
-    <span class="${a.edge>0?"good":"bad"}">Edge: ${(a.edge*100).toFixed(2)}%</span>`;
-    root.appendChild(div);
+async function loadPoly(enabled){
+  if(!enabled){setStatus('poly','Skipped','');return []}
+  const endpoint='https://gamma-api.polymarket.com/markets?limit=400';
+  return bestEffort('poly', ()=>endpoint, (arr)=>{
+    return (arr||[]).map(m=>{
+      const title=(m.title||m.question||'').trim();
+      const p=Number(m.bestBid||m.lastPrice||m.price||0);
+      const yes = p>1? clamp01(p/100): clamp01(p);
+      return {s:'Polymarket', t:title, n:normTitle(title), y:yes};
+    });
+  }, 'poly', false); // Poly allows direct; faster without proxy
+}
+async function loadMani(enabled){
+  if(!enabled){setStatus('mani','Skipped','');return []}
+  const endpoint='https://api.manifold.markets/v0/markets';
+  return bestEffort('mani', ()=>endpoint, (data)=>{
+    const bin=(data||[]).filter(m=>m.outcomeType==='BINARY');
+    return bin.map(m=>{
+      const title=(m.question||m.title||'').trim();
+      const yes = clamp01(Number(m.probability||m.p||0));
+      return {s:'Manifold', t:title, n:normTitle(title), y:yes};
+    });
+  }, 'mani', false);
+}
+async function loadInsight(enabled){
+  if(!enabled){setStatus('ins','Skipped','');return []}
+  const endpoint='https://insightprediction.com/api/v1/markets/active';
+  return bestEffort('ins', ()=>endpoint, (d)=>{
+    const arr=d?.markets||d||[];
+    return arr.map(m=>{
+      const title=(m.title||m.name||'').trim();
+      const raw=Number(m.yesPrice ?? m.bestYes ?? m.last_price ?? m.lastPrice ?? m.price ?? 0);
+      const yes= raw>1? clamp01(raw/100) : clamp01(raw);
+      return {s:'Insight', t:title, n:normTitle(title), y:yes};
+    });
+  }, 'ins', true);
+}
+async function loadMeta(enabled){
+  if(!enabled){setStatus('meta','Skipped','');return []}
+  // Open binary questions; use proxy due to CORS
+  const endpoint='https://www.metaculus.com/api2/questions/?limit=100&types=binary&status=open';
+  return bestEffort('meta', ()=>endpoint, (d)=>{
+    const arr=d?.results||d||[];
+    return arr.map(q=>{
+      const title=(q.title||q.question||'').trim();
+      // Metaculus gives community prediction as % (0..1) or mid; use 'community_prediction'
+      const y = clamp01(Number(q.community_prediction ?? q.cp ?? 0));
+      return {s:'Metaculus', t:title, n:normTitle(title), y:y};
+    });
+  }, 'meta', true);
+}
+
+// ====== Matching & Arbs ======
+function crossPairs(groups, minSim=0.7){
+  const pairs=[];
+  for(let i=0;i<groups.length;i++){
+    for(let j=i+1;j<groups.length;j++){
+      const A=groups[i], B=groups[j];
+      A.items.forEach(a=>{
+        B.items.forEach(b=>{
+          const sim=jaccard(a.n,b.n);
+          if(sim>=minSim) pairs.push({a,b,sim});
+        });
+      });
+    }
+  }
+  return pairs;
+}
+function findEdges(pool, minEdgePct){
+  const bySrc={};
+  pool.forEach(x=>{(bySrc[x.s]??=([])).push(x)});
+  const groups=Object.entries(bySrc).map(([s,items])=>({s,items}));
+
+  const pairs=crossPairs(groups,0.7);
+  const out=[];
+  pairs.forEach(({a,b,sim})=>{
+    const sum=a.y+b.y;
+    const raw=1-sum;
+    if(raw*100>=minEdgePct){
+      out.push({A:a,B:b,sum,raw,sim,time:new Date().toISOString()});
+    }
+  });
+  out.sort((x,y)=> y.raw-x.raw || y.sim-x.sim);
+  return out;
+}
+
+// ====== History & CSV ======
+function loadHist(){return readLocal(S.keys.hist,[])}
+function saveHist(newItems){
+  const ex = loadHist();
+  const key = (o)=> o.A.t+o.A.s+o.B.t+o.B.s+o.time.slice(0,16);
+  const seen = new Set(ex.map(key));
+  const add = newItems.filter(o=>{const k=key(o); if(seen.has(k))return false; seen.add(k); return true});
+  const merged = ex.concat(add).slice(-5000);
+  saveLocal(S.keys.hist, merged);
+  return merged;
+}
+function renderHist(list){
+  const root=document.getElementById('history'); root.innerHTML='';
+  if(!list.length){root.innerHTML='<div class="muted">No history yet.</div>'; return;}
+  list.slice().reverse().forEach(o=>{
+    const d=document.createElement('div'); d.className='card';
+    d.innerHTML = `
+      <div><strong>${o.A.t}</strong> <span class="tag">${o.A.s}</span></div>
+      <div><strong>${o.B.t}</strong> <span class="tag">${o.B.s}</span></div>
+      <div class="mono ${o.sum<1?'good':'bad'}">Sum ${(o.sum*100).toFixed(1)}¢</div>
+      <div class="mono ${o.raw>0?'good':'bad'}">Raw ${(o.raw*100).toFixed(2)}%</div>
+      <div class="muted" style="font-size:12px">Similarity ${(o.sim*100).toFixed(0)}% • ${new Date(o.time).toLocaleString()}</div>
+    `;
+    root.appendChild(d);
   });
 }
-update();
-setInterval(update,10000);
+function downloadCSV(){
+  const rows=[['time','A_source','A_title','A_yes','B_source','B_title','B_yes','sum','rawEdge','similarity']];
+  loadHist().forEach(o=>{
+    rows.push([o.time,o.A.s,o.A.t,o.A.y,o.B.s,o.B.t,o.B.y,o.sum,o.raw,o.sim]);
+  });
+  const csv = rows.map(r=>r.map(x=>`"${String(x).replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='arb_history_v5.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+
+// ====== UI ======
+function renderLive(list, minEdgePct, smallestIfEmpty){
+  const root=document.getElementById('live'); root.innerHTML='';
+  if(!list.length){
+    if(smallestIfEmpty){
+      const alt = smallestIfEmpty; // {A,B,sum,raw,sim}
+      const d=document.createElement('div'); d.className='card';
+      d.innerHTML = `
+        <div class="muted">No pairs ≥ ${minEdgePct}% — showing smallest-gap sample so you know we're live.</div>
+        <div><strong>${alt.A.t}</strong> <span class="tag">${alt.A.s}</span></div>
+        <div><strong>${alt.B.t}</strong> <span class="tag">${alt.B.s}</span></div>
+        <div class="mono">Sum ${(alt.sum*100).toFixed(1)}¢ · Raw ${(alt.raw*100).toFixed(2)}% · Sim ${(alt.sim*100).toFixed(0)}%</div>
+      `;
+      root.appendChild(d);
+    } else {
+      root.innerHTML='<div class="muted">No current arbs above your threshold.</div>';
+    }
+    return;
+  }
+  list.forEach(o=>{
+    const d=document.createElement('div'); d.className='card';
+    d.innerHTML = `
+      <div><strong>${o.A.t}</strong> <span class="tag">${o.A.s}</span></div>
+      <div><strong>${o.B.t}</strong> <span class="tag">${o.B.s}</span></div>
+      <div class="mono">YES_A ${(o.A.y*100).toFixed(1)}¢ · YES_B ${(o.B.y*100).toFixed(1)}¢</div>
+      <div class="mono ${o.sum<1?'good':'bad'}">Sum ${(o.sum*100).toFixed(1)}¢</div>
+      <div class="mono ${o.raw>0?'good':'bad'}">Raw ${(o.raw*100).toFixed(2)}%</div>
+      <div class="muted" style="font-size:12px">Similarity ${(o.sim*100).toFixed(0)}% • ${new Date(o.time).toLocaleTimeString()}</div>
+    `;
+    root.appendChild(d);
+  });
+}
+
+// ====== Loop ======
+let timer=null, cdInt=null, nextAt=null;
+function schedule(){
+  clearTimeout(timer); clearInterval(cdInt);
+  const sec=Math.max(5, Number(document.getElementById('refreshSec').value||15));
+  nextAt=Date.now()+sec*1000; const el=document.getElementById('countdown');
+  cdInt=setInterval(()=>{const left=Math.max(0,Math.round((nextAt-Date.now())/1000)); el.textContent=left; if(left<=0)clearInterval(cdInt)},250);
+  timer=setTimeout(tick, sec*1000);
+}
+
+async function tick(){
+  try{
+    const minEdgePct = Number(document.getElementById('minEdgePct').value||0.5);
+    const useKalshi = document.getElementById('useKalshi').checked;
+    const usePoly   = document.getElementById('usePoly').checked;
+    const useMani   = document.getElementById('useManifold').checked;
+    const useIns    = document.getElementById('useInsight').checked;
+    const useMeta   = document.getElementById('useMeta').checked;
+
+    // Respect backoff per source (if any)
+    const waits = [
+      backoff['kalshi']||0, backoff['poly']||0, backoff['mani']||0, backoff['ins']||0, backoff['meta']||0
+    ];
+    const maxWait = Math.max(...waits);
+    if(maxWait>0) await new Promise(r=>setTimeout(r, Math.min(maxWait, 6000)));
+
+    const [k,p,m,i,me] = await Promise.all([
+      loadKalshi(useKalshi),
+      loadPoly(usePoly),
+      loadMani(useMani),
+      loadInsight(useIns),
+      loadMeta(useMeta)
+    ]);
+
+    const pool=[...k,...p,...m,...i,...me];
+    // Always compute pairs; also keep a smallest-gap sample for UX
+    const allPairs = findEdges(pool, 0); // 0% threshold to get a sample
+    const sample = allPairs[0] || null;
+
+    const live = findEdges(pool, minEdgePct);
+    renderLive(live, minEdgePct, sample);
+
+    // History
+    if(live.length){ const merged=saveHist(live); renderHist(merged); } else { renderHist(loadHist()); }
+
+    document.getElementById('lastUpdated').textContent=new Date().toLocaleTimeString();
+  }catch(e){ /* statuses already show which feed failed */ }
+  finally{ schedule(); }
+}
+
+// ====== Init ======
+document.getElementById('refreshBtn').addEventListener('click', tick);
+document.getElementById('downloadBtn').addEventListener('click', downloadCSV);
+// restore last UI if you want later: (kept minimal now)
+renderHist(loadHist());
+tick();
 </script>
 </body>
 </html>
